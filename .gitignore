@@ -17,3 +17,6 @@ Thumbs.db
 
 # Local overrides: put personal settings in docker-compose.override.yml (not committed)
 docker-compose.override.yml
+
+# Personal copy of .env (use: docker compose --env-file .env.local up -d)
+.env.local
