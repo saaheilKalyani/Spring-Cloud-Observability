@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Shared logging configuration for every service  (LESSON 1: Centralized log aggregation)
+
+  Each log event is written TWICE:
+    1. CONSOLE  -> human readable, what you see with `docker logs <container>`
+    2. LOGSTASH -> JSON over TCP to logstash:5000 -> Elasticsearch -> Kibana
+
+  The LogstashTcpSocketAppender is asynchronous (ring buffer): if Logstash is down the application keeps
+  running and silently retries - logging must never take your service down.
+-->
+<configuration>
+
+    <springProperty scope="context" name="appName" source="spring.application.name" defaultValue="app"/>
+    <springProperty scope="context" name="instanceId" source="lab.instance-id" defaultValue="local"/>
+    <springProperty scope="context" name="logstashDestination" source="lab.logging.logstash-destination"
+                    defaultValue="logstash:5000"/>
+
+    <appender name="CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+        <encoder>
+            <pattern>%d{HH:mm:ss.SSS} %-5level [${instanceId}] [%X{requestId:-------}] %logger{20} - %msg%n</pattern>
+        </encoder>
+    </appender>
+
+    <appender name="LOGSTASH" class="net.logstash.logback.appender.LogstashTcpSocketAppender">
+        <destination>${logstashDestination}</destination>
+        <reconnectionDelay>10 seconds</reconnectionDelay>
+        <keepAliveDuration>5 minutes</keepAliveDuration>
+        <ringBufferSize>2048</ringBufferSize>
+        <!-- Default is 1 MINUTE: with Logstash unreachable the JVM would hang on shutdown until Docker SIGKILLs it. -->
+        <shutdownGracePeriod>1 second</shutdownGracePeriod>
+        <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+            <!-- Fields added to EVERY event: lets Kibana filter by service / instance -->
+            <customFields>{"service":"${appName}","instance":"${instanceId}"}</customFields>
+            <!-- MDC entries (requestId) are included automatically; structured args (kv(...)) become JSON fields -->
+            <fieldNames>
+                <logger>logger</logger>
+                <thread>thread</thread>
+            </fieldNames>
+            <shortenedLoggerNameLength>40</shortenedLoggerNameLength>
+        </encoder>
+    </appender>
+
+    <root level="INFO">
+        <appender-ref ref="CONSOLE"/>
+        <appender-ref ref="LOGSTASH"/>
+    </root>
+
+    <!-- Netflix libraries are chatty: keep the interesting application logs visible -->
+    <logger name="com.netflix" level="WARN"/>
+    <logger name="com.netflix.eureka.registry.AbstractInstanceRegistry" level="INFO"/>
+    <!-- INFO by default. Lesson 2 flips it to DEBUG at RUNTIME with POST /actuator/loggers/com.lab -->
+    <logger name="com.lab" level="INFO"/>
+</configuration>

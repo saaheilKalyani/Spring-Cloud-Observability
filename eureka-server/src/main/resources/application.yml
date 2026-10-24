@@ -1,0 +1,55 @@
+server:
+  port: 8761
+
+spring:
+  application:
+    name: eureka-server
+
+lab:
+  instance-id: eureka-server
+
+eureka:
+  instance:
+    hostname: eureka-server
+  client:
+    # A standalone registry must not register with itself or fetch from itself
+    register-with-eureka: false
+    fetch-registry: false
+  server:
+    # ------------------------------------------------------------------------------------------------
+    # SELF-PRESERVATION (lesson 5).  Default = true.  To see Eureka WITHOUT it:
+    #   EUREKA_SELF_PRESERVATION=false docker compose up -d eureka-server
+    # ------------------------------------------------------------------------------------------------
+    enable-self-preservation: ${EUREKA_SELF_PRESERVATION:true}
+    renewal-percent-threshold: ${EUREKA_RENEWAL_THRESHOLD:0.85}
+
+    # ---- DEMO TUNING: everything below is FASTER than production defaults so students don't wait minutes ----
+    # how often the server looks for expired leases              (default 60000)
+    eviction-interval-timer-in-ms: 3000
+    # clients heartbeat every 3s (default 30s) -> server must know, or its threshold maths is wrong
+    expected-client-renewal-interval-seconds: 3
+    # how often the "renews threshold" is recalculated             (default 15 min)
+    renewal-threshold-update-interval-ms: 15000
+    # serve registry changes within 3s instead of the 30s read-only cache default
+    use-read-only-response-cache: false
+    response-cache-update-interval-ms: 3000
+    # don't wait 5 minutes for peers on start-up (single node)
+    wait-time-in-ms-when-sync-empty: 0
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: always
+  metrics:
+    tags:
+      application: ${spring.application.name}
+  prometheus:
+    metrics:
+      export:
+        enabled: true

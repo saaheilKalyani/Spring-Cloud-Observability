@@ -1,0 +1,64 @@
+server:
+  port: 8080
+  shutdown: graceful          # SIGTERM -> finish in-flight requests -> DEREGISTER from Eureka -> exit
+
+spring:
+  application:
+    name: product-service
+  lifecycle:
+    timeout-per-shutdown-phase: 5s
+
+lab:
+  instance-id: ${INSTANCE_ID:product-local}     # unique per container (product-1, product-2, product-3)
+  admin:
+    enabled: true                                # request-id filter + /admin/health/{up|down} + /lab/whoami
+  logging:
+    logstash-destination: ${LOGSTASH_DESTINATION:logstash:5000}
+
+# ----------------------------------------------------------------------------------------------------
+# EUREKA CLIENT  (lessons 4, 5, 7)
+# Production defaults in brackets. We use SHORT timings so a failure is visible in seconds, not minutes.
+# ----------------------------------------------------------------------------------------------------
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+    registry-fetch-interval-seconds: 5                  # [30] how often THIS app refreshes its local copy of the registry
+    instance-info-replication-interval-seconds: 5       # [30] how quickly a status change (UP -> DOWN) is pushed
+    healthcheck:
+      enabled: true                                     # push /actuator/health status to Eureka (not just "process alive")
+  instance:
+    instance-id: ${spring.application.name}:${lab.instance-id}
+    hostname: ${EUREKA_INSTANCE_HOSTNAME:localhost}     # the docker-compose service name => resolvable by other containers
+    prefer-ip-address: false
+    lease-renewal-interval-in-seconds: 3                # [30] HEARTBEAT interval
+    lease-expiration-duration-in-seconds: 6             # [90] no heartbeat for this long => lease expired => evicted (docker-compose overrides via EUREKA_LEASE_EXPIRATION)
+    metadata-map:
+      instanceLabel: ${lab.instance-id}
+
+# ----------------------------------------------------------------------------------------------------
+# ACTUATOR + MICROMETER  (lessons 2, 3)
+# ----------------------------------------------------------------------------------------------------
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,loggers,mappings,env
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true                                    # /actuator/health/liveness + /readiness
+  metrics:
+    tags:
+      application: ${spring.application.name}            # becomes the `application` label on every metric
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true                       # buckets => histogram_quantile() p95/p99 in PromQL
+  info:
+    env:
+      enabled: true
+
+info:
+  app: ${spring.application.name}
+  instance: ${lab.instance-id}

@@ -1,0 +1,214 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: api-gateway
+  lifecycle:
+    timeout-per-shutdown-phase: 5s
+  data:
+    redis:
+      host: ${REDIS_HOST:redis}
+      port: 6379
+      timeout: 1s            # if Redis dies the limiter must not hang requests (see lesson 10 "Redis down" drill)
+      connect-timeout: 1s
+  cloud:
+    loadbalancer:
+      cache:
+        ttl: 5s              # [35s] LoadBalancer's cached instance list (behind every lb:// URI)
+
+    # =======================================================================================================
+    # SPRING CLOUD GATEWAY  (2025.0 / Gateway 4.3 property prefix: spring.cloud.gateway.server.webflux.*)
+    # Anatomy of a route:  id  +  uri  +  predicates (WHEN does it match?)  +  filters (WHAT do we change?)
+    # The same table also receives the Java-DSL routes from config/RouteConfig.java (ids start with "dsl-").
+    # =======================================================================================================
+    gateway:
+      server:
+        webflux:
+          httpclient:
+            connect-timeout: 2000          # ms - give up connecting to a dead instance quickly
+            response-timeout: 4s           # a frozen (docker pause) instance => 504 after 4s instead of hanging
+            pool:
+              max-idle-time: 5s
+          metrics:
+            enabled: true                  # spring_cloud_gateway_requests_seconds{routeId=...} for Prometheus
+          globalcors:
+            cors-configurations:
+              '[/**]':
+                allowedOriginPatterns: "*"
+                allowedMethods: "*"
+                allowedHeaders: "*"
+                exposedHeaders: "*"
+
+          # DEFAULT FILTERS: like a global filter, but declared in YAML and applied to every route of this file
+          default-filters:
+            - AddResponseHeader=X-Gateway, spring-cloud-gateway
+
+          routes:
+            # ---------------------------------------------------------------------------------------------
+            # 1) Path + Method predicates, LOAD-BALANCED uri, AddRequestHeader/AddResponseHeader/Retry filters
+            # ---------------------------------------------------------------------------------------------
+            - id: y-products
+              uri: lb://product-service                 # lb:// = ask Eureka + Spring Cloud LoadBalancer for an instance
+              predicates:
+                - Path=/api/products/**
+                - Method=GET
+              filters:
+                - AddRequestHeader=X-Gateway-Route, y-products
+                - AddResponseHeader=X-Route-Source, yaml
+                - name: Retry                           # on a bad gateway/timeout try ANOTHER instance
+                  args:
+                    retries: 2
+                    methods: GET
+                    statuses: BAD_GATEWAY, SERVICE_UNAVAILABLE, GATEWAY_TIMEOUT
+                    backoff:
+                      firstBackoff: 50ms
+                      maxBackoff: 400ms
+                      factor: 2
+                      basedOnPreviousValue: false
+
+            # 1b) Same service, NO Retry filter. Used in lessons 7 and 11 to see what a failure looks like when
+            #     nothing hides it (compare with y-products, which retries on another instance).
+            - id: y-noretry
+              uri: lb://product-service
+              predicates:
+                - Path=/noretry/**
+                - Method=GET
+              filters:
+                - RewritePath=/noretry/(?<segment>.*), /api/$\{segment}
+                - AddResponseHeader=X-Route-Source, yaml
+
+            # 2) Query predicate + SetPath filter.  Declared with a LOWER order => evaluated BEFORE y-products.
+            - id: y-products-preview
+              order: -10
+              uri: lb://product-service
+              predicates:
+                - Path=/api/products
+                - Query=preview, true                   # only when ?preview=true is present
+              filters:
+                - SetPath=/api/products/recommendations
+                - AddResponseHeader=X-Route-Source, yaml-query-predicate
+
+            # 3) Cookie predicate: "beta users" get a different filter chain on the same URL
+            - id: y-products-beta-cookie
+              order: -5
+              uri: lb://product-service
+              predicates:
+                - Path=/api/products/**
+                - Method=GET
+                - Cookie=lab-beta, true
+              filters:
+                - AddResponseHeader=X-Route-Source, yaml-cookie-predicate
+                - AddResponseHeader=X-Beta, you-are-in-the-beta-group
+
+            # 4) PER-ROUTE custom filter (RequireAuth) protects order-service; the global filter only identifies
+            - id: y-orders
+              uri: lb://order-service
+              predicates:
+                - Path=/api/orders/**
+              filters:
+                - RequireAuth=USER                      # custom GatewayFilterFactory: 401 / 403
+                - AddResponseHeader=X-Route-Source, yaml
+
+            # 5) Time-based predicate: this promo URL only exists inside the window (After / Before / Between)
+            - id: y-promo-window
+              uri: lb://product-service
+              predicates:
+                - Path=/promo/**
+                - Between=2020-01-01T00:00:00.000+00:00[UTC], 2099-12-31T23:59:59.000+00:00[UTC]
+              filters:
+                - SetPath=/api/products/recommendations
+                - AddResponseHeader=X-Route-Source, yaml-time-predicate
+            - id: y-promo-expired
+              uri: lb://product-service
+              predicates:
+                - Path=/promo-expired/**
+                - Before=2020-01-01T00:00:00.000+00:00[UTC]      # already in the past => NEVER matches => 404
+              filters:
+                - SetPath=/api/products/recommendations
+
+            # ---------------------------------------------------------------------------------------------
+            # 6) RATE LIMITING (lesson 10): Redis-backed token bucket.
+            #    Same URL, two plans: the Header predicate decides which bucket size applies.
+            #    NOTE: a predicate is evaluated BEFORE any filter, so a client-supplied X-Plan header is NOT
+            #    trustworthy. In production derive the plan from a verified token claim.
+            # ---------------------------------------------------------------------------------------------
+            - id: y-limited-premium
+              order: 0
+              uri: lb://product-service
+              predicates:
+                - Path=/limited/**
+                - Header=X-Plan, premium
+              filters:
+                - RewritePath=/limited/(?<segment>.*), /api/$\{segment}
+                - AddResponseHeader=X-Route-Source, yaml
+                - name: RequestRateLimiter
+                  args:
+                    redis-rate-limiter.replenishRate: 10     # tokens added per second   (steady rate)
+                    redis-rate-limiter.burstCapacity: 20     # bucket size               (max burst)
+                    redis-rate-limiter.requestedTokens: 1    # cost of one request
+                    key-resolver: "#{@userKeyResolver}"
+            - id: y-limited-standard
+              order: 1
+              uri: lb://product-service
+              predicates:
+                - Path=/limited/**
+              filters:
+                - RewritePath=/limited/(?<segment>.*), /api/$\{segment}
+                - AddResponseHeader=X-Route-Source, yaml
+                - name: RequestRateLimiter
+                  args:
+                    redis-rate-limiter.replenishRate: 2
+                    redis-rate-limiter.burstCapacity: 5
+                    redis-rate-limiter.requestedTokens: 1
+                    key-resolver: "#{@userKeyResolver}"
+
+# Demo users. Token -> identity. (Production: JWT validated against an identity provider.)
+lab:
+  instance-id: api-gateway
+  logging:
+    logstash-destination: ${LOGSTASH_DESTINATION:logstash:5000}
+  lb:
+    enabled: true                  # SwitchableLoadBalancer: flip round-robin <-> random at runtime
+    default-strategy: round-robin
+  auth:
+    users:
+      token-alice-123: { id: alice, roles: [USER], tier: standard }
+      token-bob-456: { id: bob, roles: [USER, ADMIN], tier: premium }
+      token-carol-789: { id: carol, roles: [GUEST], tier: standard }
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+    registry-fetch-interval-seconds: 5
+    instance-info-replication-interval-seconds: 5
+    healthcheck:
+      enabled: true
+  instance:
+    instance-id: ${spring.application.name}:${lab.instance-id}
+    hostname: ${EUREKA_INSTANCE_HOSTNAME:localhost}
+    prefer-ip-address: false
+    lease-renewal-interval-in-seconds: 3
+    lease-expiration-duration-in-seconds: 6
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,gateway,loggers,env
+  endpoint:
+    gateway:
+      access: unrestricted         # /actuator/gateway/routes  = the live route table (not enabled by default!)
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+        spring.cloud.gateway.requests: true

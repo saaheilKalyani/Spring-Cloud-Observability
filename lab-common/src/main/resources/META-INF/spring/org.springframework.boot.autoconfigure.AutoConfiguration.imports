@@ -1,0 +1,2 @@
+com.lab.common.lb.LabLoadBalancerAutoConfiguration
+com.lab.common.admin.LabServletAutoConfiguration

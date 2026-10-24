@@ -1,0 +1,55 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: order-service
+  lifecycle:
+    timeout-per-shutdown-phase: 5s
+  cloud:
+    loadbalancer:
+      cache:
+        ttl: 5s            # [35s] how long LoadBalancer caches the instance list before asking the Eureka client again
+
+lab:
+  instance-id: ${INSTANCE_ID:order-local}
+  admin:
+    enabled: true
+  lb:
+    enabled: true                 # use SwitchableLoadBalancer (round-robin <-> random) instead of the default
+    default-strategy: round-robin
+  logging:
+    logstash-destination: ${LOGSTASH_DESTINATION:logstash:5000}
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URL:http://localhost:8761/eureka/}
+    registry-fetch-interval-seconds: 5
+    instance-info-replication-interval-seconds: 5
+    healthcheck:
+      enabled: true
+  instance:
+    instance-id: ${spring.application.name}:${lab.instance-id}
+    hostname: ${EUREKA_INSTANCE_HOSTNAME:localhost}
+    prefer-ip-address: false
+    lease-renewal-interval-in-seconds: 3
+    lease-expiration-duration-in-seconds: 6
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,loggers,mappings,env
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    tags:
+      application: ${spring.application.name}
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true

@@ -1,0 +1,12 @@
+**/target
+**/.idea
+**/*.iml
+.git
+.github
+ui
+infra
+lab-control
+docs
+*.md
+*.txt
+.env

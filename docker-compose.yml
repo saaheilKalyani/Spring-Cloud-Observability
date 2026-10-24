@@ -1,0 +1,340 @@
+# ======================================================================================================
+#  Spring Cloud Observability Lab
+#
+#  Start everything :  docker compose up -d --build        (first time: ~5-8 min, later: seconds)
+#  Open the lab UI  :  http://localhost:8800   (port = UI_PORT in .env)
+#  Stop everything  :  docker compose down            (add -v to also delete stored logs/metrics)
+#
+#  Optional stacks are "profiles" switched on in .env  (COMPOSE_PROFILES=elk,metrics)
+# ======================================================================================================
+name: spring-cloud-lab
+
+# ---- shared snippets (YAML anchors) so every Java service stays 10 lines long -------------------------
+x-java-env: &java-env
+  EUREKA_URL: http://eureka-server:8761/eureka/
+  LOGSTASH_DESTINATION: logstash:5000
+  JAVA_OPTS: -XX:+UseSerialGC -Xss512k -XX:TieredStopAtLevel=1 -Xms48m -Xmx176m -XX:MaxMetaspaceSize=128m
+  # How long Eureka waits without a heartbeat before it declares an instance dead (seconds).
+  #   6 = fast classroom demo (default)   |   90 = Eureka's real default; needed to SEE self-preservation (lesson 5)
+  EUREKA_INSTANCE_LEASE_EXPIRATION_DURATION_IN_SECONDS: ${EUREKA_LEASE_EXPIRATION:-6}
+
+x-java-health: &java-health
+  test: ["CMD-SHELL", "wget -qO- http://localhost:8080/actuator/health/liveness | grep -q UP"]
+  interval: 10s
+  timeout: 3s
+  retries: 12
+  start_period: 30s
+
+x-product-build: &product-build
+  context: .
+  target: product-service
+
+x-bff-build: &bff-build
+  context: .
+  target: bff-service
+
+services:
+
+  # ====================================================================================================
+  #  CORE  (always started)
+  # ====================================================================================================
+
+  eureka-server:                                   # LESSON 5  - service registry
+    build: { context: ., target: eureka-server }
+    image: lab/eureka-server:1.0.0
+    container_name: eureka-server
+    restart: unless-stopped
+    ports: ["${BIND_ADDR:-127.0.0.1}:${EUREKA_PORT:-8761}:8761"]
+    environment:
+      <<: *java-env
+      EUREKA_SELF_PRESERVATION: ${EUREKA_SELF_PRESERVATION:-true}
+      EUREKA_RENEWAL_THRESHOLD: ${EUREKA_RENEWAL_THRESHOLD:-0.85}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8761/actuator/health/liveness | grep -q UP"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+
+  redis:                                           # LESSON 10 - token buckets for the rate limiter
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports: ["${BIND_ADDR:-127.0.0.1}:${REDIS_PORT:-6380}:6379"]
+    labels:
+      lab.control: "true"
+      lab.role: infrastructure
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 2s
+      retries: 10
+
+  product-service-1:                               # LESSONS 4-7 - three identical instances of ONE logical service
+    build: *product-build
+    image: lab/product-service:1.0.0
+    container_name: product-service-1
+    restart: "no"                                  # stays dead when killed, so students can watch Eureka evict it
+    depends_on:
+      eureka-server: { condition: service_healthy }
+    ports: ["${BIND_ADDR:-127.0.0.1}:8081:8080"]
+    environment:
+      <<: *java-env
+      INSTANCE_ID: product-1
+      EUREKA_INSTANCE_HOSTNAME: product-service-1
+    labels: { lab.control: "true", lab.role: product-service }
+    healthcheck: *java-health
+
+  product-service-2:
+    build: *product-build
+    image: lab/product-service:1.0.0
+    container_name: product-service-2
+    restart: "no"
+    depends_on:
+      eureka-server: { condition: service_healthy }
+    ports: ["${BIND_ADDR:-127.0.0.1}:8082:8080"]
+    environment:
+      <<: *java-env
+      INSTANCE_ID: product-2
+      EUREKA_INSTANCE_HOSTNAME: product-service-2
+    labels: { lab.control: "true", lab.role: product-service }
+    healthcheck: *java-health
+
+  product-service-3:
+    build: *product-build
+    image: lab/product-service:1.0.0
+    container_name: product-service-3
+    restart: "no"
+    depends_on:
+      eureka-server: { condition: service_healthy }
+    ports: ["${BIND_ADDR:-127.0.0.1}:8083:8080"]
+    environment:
+      <<: *java-env
+      INSTANCE_ID: product-3
+      EUREKA_INSTANCE_HOSTNAME: product-service-3
+    labels: { lab.control: "true", lab.role: product-service }
+    healthcheck: *java-health
+
+  order-service:                                   # LESSONS 4,6 - consumer using CLIENT-SIDE discovery
+    build: { context: ., target: order-service }
+    image: lab/order-service:1.0.0
+    container_name: order-service
+    restart: "no"
+    depends_on:
+      eureka-server: { condition: service_healthy }
+    ports: ["${BIND_ADDR:-127.0.0.1}:8084:8080"]
+    environment:
+      <<: *java-env
+      INSTANCE_ID: order-1
+      EUREKA_INSTANCE_HOSTNAME: order-service
+    labels: { lab.control: "true", lab.role: order-service }
+    healthcheck: *java-health
+
+  web-bff:                                         # LESSON 12 - Backend For Frontend (browser)
+    build: *bff-build
+    image: lab/bff-service:1.0.0
+    container_name: web-bff
+    restart: "no"
+    depends_on:
+      eureka-server: { condition: service_healthy }
+    ports: ["${BIND_ADDR:-127.0.0.1}:8085:8080"]
+    environment:
+      <<: *java-env
+      BFF_NAME: web-bff
+      SPRING_PROFILES_ACTIVE: web
+      INSTANCE_ID: web-bff-1
+      EUREKA_INSTANCE_HOSTNAME: web-bff
+    labels: { lab.control: "true", lab.role: bff }
+    healthcheck: *java-health
+
+  mobile-bff:                                      # LESSON 12 - Backend For Frontend (phone)
+    build: *bff-build
+    image: lab/bff-service:1.0.0
+    container_name: mobile-bff
+    restart: "no"
+    depends_on:
+      eureka-server: { condition: service_healthy }
+    ports: ["${BIND_ADDR:-127.0.0.1}:8086:8080"]
+    environment:
+      <<: *java-env
+      BFF_NAME: mobile-bff
+      SPRING_PROFILES_ACTIVE: mobile
+      INSTANCE_ID: mobile-bff-1
+      EUREKA_INSTANCE_HOSTNAME: mobile-bff
+    labels: { lab.control: "true", lab.role: bff }
+    healthcheck: *java-health
+
+  api-gateway:                                     # LESSONS 8-12 - Spring Cloud Gateway
+    build: { context: ., target: api-gateway }
+    image: lab/api-gateway:1.0.0
+    container_name: api-gateway
+    restart: unless-stopped
+    depends_on:
+      eureka-server: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    ports: ["${BIND_ADDR:-127.0.0.1}:${GATEWAY_PORT:-8880}:8080"]
+    environment:
+      <<: *java-env
+      JAVA_OPTS: -XX:+UseSerialGC -Xss512k -XX:TieredStopAtLevel=1 -Xms64m -Xmx224m -XX:MaxMetaspaceSize=160m
+      EUREKA_INSTANCE_HOSTNAME: api-gateway
+      REDIS_HOST: redis
+    healthcheck: *java-health
+
+  # ----------------------------------------------------------------------------------------------------
+  #  lab-control: lets the UI pause / stop / kill / start the containers labelled lab.control=true.
+  #  Needs the Docker socket, therefore it is NOT published to the host - only the UI proxy can reach it.
+  # ----------------------------------------------------------------------------------------------------
+  lab-control:
+    build: ./lab-control
+    image: lab/lab-control:1.0.0
+    container_name: lab-control
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  ui:                                              # the interactive teaching console
+    image: nginx:1.27-alpine
+    container_name: lab-ui
+    restart: unless-stopped
+    ports: ["${BIND_ADDR:-127.0.0.1}:${UI_PORT:-8800}:80"]
+    environment:
+      LAB_GATEWAY_PORT: ${GATEWAY_PORT:-8880}
+      LAB_EUREKA_PORT: ${EUREKA_PORT:-8761}
+      LAB_KIBANA_PORT: ${KIBANA_PORT:-5601}
+      LAB_PROMETHEUS_PORT: ${PROMETHEUS_PORT:-9099}
+      LAB_GRAFANA_PORT: ${GRAFANA_PORT:-3030}
+      LAB_ES_PORT: ${ES_PORT:-9200}
+      LAB_REDIS_PORT: ${REDIS_PORT:-6380}
+    volumes:
+      # *.template files are run through envsubst at start-up (this is how config.js learns the ports)
+      - ./ui/nginx.conf:/etc/nginx/templates/default.conf.template:ro
+      - ./ui/html:/usr/share/nginx/html:ro
+      - ./:/srv/repo:ro                            # lets the UI show the REAL source files next to each lesson
+
+  # ====================================================================================================
+  #  PROFILE: elk      LESSON 1 - centralized log aggregation
+  #  Flow:  service -> Logback TCP appender -> Logstash:5000 -> Elasticsearch -> Kibana
+  # ====================================================================================================
+
+  elasticsearch:
+    profiles: ["elk"]
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.15.5
+    container_name: elasticsearch
+    restart: unless-stopped
+    labels: { lab.control: "true", lab.role: elk }
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"               # lab only! never in production
+      ES_JAVA_OPTS: -Xms512m -Xmx512m
+      cluster.routing.allocation.disk.threshold_enabled: "false"
+      ingest.geoip.downloader.enabled: "false"
+    ports: ["${BIND_ADDR:-127.0.0.1}:${ES_PORT:-9200}:9200"]
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health | grep -qE 'green|yellow'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  es-init:                                         # one-shot: creates the index template BEFORE logs arrive
+    profiles: ["elk"]
+    image: curlimages/curl:8.10.1
+    container_name: es-init
+    restart: "no"
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+    volumes:
+      - ./infra/elk/es-init.sh:/es-init.sh:ro
+    entrypoint: ["sh", "/es-init.sh"]
+
+  logstash:
+    profiles: ["elk"]
+    image: docker.elastic.co/logstash/logstash:8.15.5
+    container_name: logstash
+    restart: unless-stopped
+    labels: { lab.control: "true", lab.role: elk }
+    depends_on:
+      es-init: { condition: service_completed_successfully }
+    environment:
+      LS_JAVA_OPTS: -Xms256m -Xmx256m
+      PIPELINE_WORKERS: "1"
+      XPACK_MONITORING_ENABLED: "false"
+      LOG_LEVEL: warn
+    volumes:
+      - ./infra/elk/logstash/pipeline:/usr/share/logstash/pipeline:ro
+
+  kibana:
+    profiles: ["elk"]
+    image: docker.elastic.co/kibana/kibana:8.15.5
+    container_name: kibana
+    restart: unless-stopped
+    labels: { lab.control: "true", lab.role: elk }
+    depends_on:
+      elasticsearch: { condition: service_healthy }
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+      TELEMETRY_ENABLED: "false"
+      NODE_OPTIONS: --max-old-space-size=512
+    ports: ["${BIND_ADDR:-127.0.0.1}:${KIBANA_PORT:-5601}:5601"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status | grep -q '\"level\":\"available\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 40s
+
+  kibana-setup:                                    # one-shot: data view + saved searches, so Kibana is ready to use
+    profiles: ["elk"]
+    image: curlimages/curl:8.10.1
+    container_name: kibana-setup
+    restart: "no"
+    depends_on:
+      kibana: { condition: service_healthy }
+    volumes:
+      - ./infra/elk/kibana-setup.sh:/kibana-setup.sh:ro
+    entrypoint: ["sh", "/kibana-setup.sh"]
+
+  # ====================================================================================================
+  #  PROFILE: metrics   LESSONS 2-3 - Actuator + Micrometer -> Prometheus -> Grafana
+  # ====================================================================================================
+
+  prometheus:
+    profiles: ["metrics"]
+    image: prom/prometheus:v2.51.0
+    container_name: prometheus
+    restart: unless-stopped
+    labels: { lab.control: "true", lab.role: metrics }
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=2h
+      - --web.enable-lifecycle
+    ports: ["${BIND_ADDR:-127.0.0.1}:${PROMETHEUS_PORT:-9099}:9090"]
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
+
+  grafana:
+    profiles: ["metrics"]
+    image: grafana/grafana:10.4.0
+    container_name: grafana
+    restart: unless-stopped
+    labels: { lab.control: "true", lab.role: metrics }
+    depends_on: [prometheus]
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"             # classroom: no login needed, can edit dashboards
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"           # lets the lab UI embed dashboards in an <iframe>
+      GF_USERS_DEFAULT_THEME: light
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    ports: ["${BIND_ADDR:-127.0.0.1}:${GRAFANA_PORT:-3030}:3000"]
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/grafana/dashboards:/var/lib/grafana/dashboards:ro
+
+volumes:
+  esdata:

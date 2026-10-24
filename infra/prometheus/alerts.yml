@@ -1,0 +1,27 @@
+# Alert rules (open http://localhost:9090/alerts). Try: pause or kill a product-service container in the UI.
+groups:
+  - name: lab-alerts
+    rules:
+      - alert: InstanceDown
+        expr: up == 0
+        for: 10s
+        labels: { severity: critical }
+        annotations:
+          summary: "{{ $labels.instance }} is not answering scrapes"
+          description: "Prometheus could not scrape {{ $labels.job }}/{{ $labels.instance }} for 10 seconds."
+
+      - alert: HighServerErrorRate
+        expr: sum by (application) (rate(http_server_requests_seconds_count{status=~"5.."}[1m])) > 0.2
+        for: 10s
+        labels: { severity: warning }
+        annotations:
+          summary: "{{ $labels.application }} is returning 5xx"
+          description: "More than 0.2 server errors per second for 10 seconds."
+
+      - alert: GatewayRateLimiting
+        expr: sum(rate(spring_cloud_gateway_requests_seconds_count{httpStatusCode="429"}[1m])) > 0.5
+        for: 5s
+        labels: { severity: info }
+        annotations:
+          summary: "The gateway is rejecting requests with 429"
+          description: "Rate limiter is active: more than 0.5 rejected requests per second."

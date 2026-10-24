@@ -1,0 +1,316 @@
+==============================================================================================
+ SPRING CLOUD OBSERVABILITY LAB  -  RUN IT STEP BY STEP
+==============================================================================================
+
+ What you get after these steps:
+   * 15 containers running on your own computer (Spring services, Eureka, Gateway, Redis,
+     ELK, Prometheus, Grafana, an interactive teaching console).
+   * One web page, http://localhost:8800, with 12 lessons. Every lesson has experiments
+     that you run with buttons.
+
+ You do NOT need Java, Maven, Node or Python installed. Everything is compiled inside Docker.
+
+
+----------------------------------------------------------------------------------------------
+ PART 1 - WHAT YOU NEED (once per computer)
+----------------------------------------------------------------------------------------------
+
+ 1.1  Docker
+        Windows / macOS : install "Docker Desktop" (https://www.docker.com/products/docker-desktop)
+                          and START it. Wait until it says "Docker Desktop is running".
+        Linux           : install Docker Engine + the Compose v2 plugin
+                          (https://docs.docker.com/engine/install/).
+
+ 1.2  Memory for Docker  (this is the most common reason for problems)
+        Full lab (everything)          : give Docker at least  6 GB RAM (it needs about 4.2 GB).
+        Without ELK (Kibana/Logstash..) : 3 GB is enough (core about 1.6 GB + metrics 0.4 GB).
+        Windows/macOS : Docker Desktop -> Settings -> Resources -> Memory.
+        (If your computer has only 8 GB in total, use "LOW MEMORY MODE" in Part 5.)
+
+ 1.3  Disk space : about 8 GB (images, build cache, Elasticsearch data).
+
+ 1.4  Internet   : needed for the first start only (downloads images and Java libraries).
+
+ 1.5  Git        : to clone the repository (https://git-scm.com/downloads).
+
+ Check that Docker works. Open a terminal (PowerShell / Terminal / bash) and type:
+
+        docker version
+        docker compose version
+
+ Both must print version numbers without errors. If you see "Cannot connect to the Docker
+ daemon", Docker Desktop is not started yet.
+
+
+----------------------------------------------------------------------------------------------
+ PART 2 - GET THE PROJECT
+----------------------------------------------------------------------------------------------
+
+        git clone <the-repository-url>
+        cd Spring-Cloud-Observability
+
+ (Windows: Git may convert line endings. The file .gitattributes in the repository prevents
+  problems with the shell scripts. If you downloaded a ZIP instead of cloning, that is fine too.)
+
+
+----------------------------------------------------------------------------------------------
+ PART 3 - START EVERYTHING  (one command)
+----------------------------------------------------------------------------------------------
+
+        docker compose up -d --build
+
+ What happens:
+   * First run: downloads about 3 GB of images and compiles all Java services inside Docker.
+     This takes 5-10 minutes depending on your internet. Later runs take seconds.
+   * Each Spring service needs about 40 seconds after its container starts before it is ready.
+
+ Watch the progress (any time):
+
+        docker compose ps
+
+ You are ready when every line says "Up ... (healthy)" - except lab-ui, lab-control and the
+ one-shot helpers es-init / kibana-setup, which have no health status or "Exited (0)"
+ (that is correct, they finish their job and stop).
+ Kibana is the slowest: allow 2-3 minutes after the first start.
+
+ Now open the lab console:
+
+        http://localhost:8800
+
+ In the left sidebar, "Signed in as" -> choose "alice" (the lessons need a logged-in user).
+ The coloured "Live system map" on the right should show all dots green.
+
+
+----------------------------------------------------------------------------------------------
+ PART 4 - THE LESSONS  (what to open, what to press)
+----------------------------------------------------------------------------------------------
+
+ Open the lessons in the sidebar from top to bottom. Each lesson has: Idea, Try it,
+ Check yourself, Source. Below is the 30-second version of each experiment, plus the
+ equivalent terminal command if you prefer curl. (On Windows PowerShell use "curl.exe", not
+ "curl".)
+
+ ---- 1. Centralized logging with ELK  (needs profile "elk") ---------------------------------
+   UI  : press "Place an order and trace it". The viewer shows the log lines of ONE request
+         from api-gateway -> order-service -> product-service, tied together by a request id.
+   UI  : press "Cause an error", then open "Errors only" in Kibana.
+   Try : docker compose logs -f logstash          (what Logstash receives)
+         curl "http://localhost:9200/_cat/indices/spring-logs-*?v"
+   Kibana: http://localhost:5601  (a data view "spring-logs-*" and 3 saved searches exist)
+
+ ---- 2. Actuator and Micrometer -------------------------------------------------------------
+   UI  : "Actuator explorer": pick product-service-1, press "prometheus text", type "lab_" in
+         the filter. Then the counter / gauge / timer experiment, then the log-level change.
+   Try : curl http://localhost:8081/actuator/health
+         curl http://localhost:8081/actuator/metrics/jvm.memory.used
+         curl http://localhost:8081/actuator/prometheus
+
+ ---- 3. Prometheus and Grafana  (needs profile "metrics") -----------------------------------
+   UI  : press "Start traffic", pick a preset in the PromQL playground, scroll to the embedded
+         Grafana dashboards. Freeze product-service-2 and watch the InstanceDown alert fire.
+   Open: Prometheus http://localhost:9099   Grafana http://localhost:3030 (no login)
+
+ ---- 4. Discovery patterns ------------------------------------------------------------------
+   UI  : press "Send 9 calls" in both experiments (client-side vs server-side).
+   Try : curl "http://localhost:8084/api/orders/client-side-demo?n=9"    (client-side)
+         curl http://localhost:8880/api/products/whoami                  (server-side, repeat it)
+
+ ---- 5. Eureka registry ---------------------------------------------------------------------
+   UI  : "Stop (graceful)" product-service-3 -> row disappears at once.
+         "Start" it, then "Kill (crash)" -> read the timeline: Eureka needs ~12-20 seconds.
+   Open: http://localhost:8761  (Eureka's own dashboard)
+   Self-preservation drill (takes about 6 minutes, see the lesson):
+         1. edit .env  ->  EUREKA_LEASE_EXPIRATION=90          (Eureka's real default)
+         2. docker compose up -d                               (services restart, wait ~1 min)
+         3. in the UI freeze FOUR of the seven services (3 products + order-service) and watch
+            the meter in the lesson: after ~2 minutes "SELF-PRESERVATION ACTIVE" appears and the
+            dead instances stay listed as UP.
+         4. unfreeze them; when finished set EUREKA_LEASE_EXPIRATION=6 and run docker compose up -d
+
+ ---- 6. Spring Cloud LoadBalancer -----------------------------------------------------------
+   UI  : switch Round-robin / Random, press "Send via the gateway" with 9, then 300 requests.
+   Try : curl -X POST http://localhost:8880/lab/lb/random
+         for i in 1 2 3 4 5 6; do curl -s http://localhost:8880/api/products/whoami; echo; done
+         curl -X POST http://localhost:8880/lab/lb/round-robin
+
+ ---- 7. Health checks and deregistration ----------------------------------------------------
+   UI  : "Start all three probes", then try Health DOWN, Kill, Freeze on one instance.
+   Try : curl -X POST http://localhost:8082/admin/health/down    (process alive, health DOWN)
+         curl -X POST http://localhost:8082/admin/health/up
+         docker compose pause product-service-2                  (freeze)
+         docker compose unpause product-service-2
+         docker compose kill product-service-2                   (crash)
+         docker compose up -d product-service-2                  (bring it back)
+
+ ---- 8. Gateway routes and predicates -------------------------------------------------------
+   UI  : read the live route table, then press the presets in "Send a request and see which
+         route wins".
+   Try : curl "http://localhost:8880/api/products?preview=true"          (Query predicate)
+         curl -H "Cookie: lab-beta=true" http://localhost:8880/api/products/whoami
+         curl -i http://localhost:8880/dsl/whoami                          (Java DSL route)
+         curl http://localhost:8880/actuator/gateway/routes                (the route table)
+
+ ---- 9. Gateway filters ---------------------------------------------------------------------
+   UI  : call /api/products/echo as anonymous / alice, with and without the forged header.
+         Then /api/orders as anonymous (401), carol (403), alice (200).
+   Try : curl -H "Authorization: Bearer token-alice-123" -H "X-User-Id: admin" \
+              http://localhost:8880/api/products/echo
+         curl -i http://localhost:8880/api/orders                          (401)
+         curl http://localhost:8880/masked/products                        (prices masked)
+   Demo users (token -> user): token-alice-123 alice [USER], token-bob-456 bob [USER,ADMIN],
+                               token-carol-789 carol [GUEST].
+
+ ---- 10. Rate limiting with Redis -----------------------------------------------------------
+   UI  : "Burst of 10" with the Standard plan, then Premium; look at the Redis keys; stop redis.
+   Try : for i in $(seq 1 12); do curl -s -o /dev/null -w "%{http_code} " \
+              -H "X-Client-Id: me" http://localhost:8880/limited/products/whoami; done
+         docker exec -it redis redis-cli --scan --pattern 'request_rate_limiter*'
+
+ ---- 11. Load balancing at the gateway ------------------------------------------------------
+   UI  : "Send 30 requests"; then kill one instance and press "Compare retry vs no retry".
+
+ ---- 12. API Gateway vs BFF -----------------------------------------------------------------
+   UI  : press "Load the home screen" with 100 ms and 300 ms of network latency.
+   Try : curl -H "Authorization: Bearer token-alice-123" http://localhost:8880/bff/web/home
+         curl -H "Authorization: Bearer token-alice-123" http://localhost:8880/bff/mobile/home
+         curl -H "Authorization: Bearer token-alice-123" -H "X-Client-Type: mobile" \
+              http://localhost:8880/bff/home
+
+ After any drill that stopped containers, press "Heal" in the sidebar of the console, or run
+        docker compose up -d
+
+
+----------------------------------------------------------------------------------------------
+ PART 5 - OPTIONS
+----------------------------------------------------------------------------------------------
+
+ All settings live in the file  .env  (open it with any editor). After editing, run
+        docker compose up -d
+ and Docker recreates only what changed.
+
+ 5.1  LOW MEMORY MODE  (computer with 8 GB RAM or less)
+        In .env set    COMPOSE_PROFILES=            (leave it empty)
+        Then           docker compose up -d
+        You get the core system (lessons 4-12) in about 1.6 GB of container memory. Lessons 1-3 will say
+        "ELK / Prometheus is not running". Start them on demand, one at a time:
+              docker compose --profile metrics up -d       (Prometheus + Grafana, ~0.4 GB)
+              docker compose --profile elk up -d           (Elasticsearch, Logstash, Kibana, ~2.1 GB)
+        and stop them again with
+              docker compose stop elasticsearch logstash kibana
+              docker compose stop prometheus grafana
+
+ 5.2  A PORT IS ALREADY IN USE
+        Error: "Bind for 127.0.0.1:8880 failed: port is already allocated"
+        Open .env, change that port (UI_PORT, GATEWAY_PORT, GRAFANA_PORT ...), run
+        docker compose up -d. The console links update automatically.
+
+ 5.3  SHOW THE LAB TO OTHER DEVICES IN THE CLASSROOM
+        In .env set    BIND_ADDR=0.0.0.0
+        Run            docker compose up -d
+        Students open  http://<your-computer-ip>:8800
+        WARNING: the console can stop and kill containers. Do this only on a network you trust.
+
+ 5.4  EUREKA TIMING and SELF-PRESERVATION  (.env)
+        EUREKA_LEASE_EXPIRATION   6   fast demo  |  90 = Eureka's real default
+        EUREKA_SELF_PRESERVATION  true | false
+        EUREKA_RENEWAL_THRESHOLD  0.85 (the real default)
+
+
+----------------------------------------------------------------------------------------------
+ PART 6 - CHANGE THE CODE AND TRY AGAIN
+----------------------------------------------------------------------------------------------
+
+ Everything the lessons show is real code you can edit. After a change in a Java file or an
+ application.yml, rebuild only that service:
+
+        docker compose up -d --build api-gateway
+        docker compose up -d --build product-service-1 product-service-2 product-service-3
+
+ Ideas for student exercises:
+   * api-gateway/src/main/resources/application.yml : add a route, change burstCapacity, add a
+     predicate (Query / Header / Method) and test it in lesson 8.
+   * api-gateway/.../filter/ : write a new GlobalFilter that adds a response header.
+   * infra/elk/logstash/pipeline/logstash.conf : drop DEBUG events or tag slow requests, then
+        docker compose restart logstash
+   * infra/prometheus/alerts.yml : add an alert, then
+        curl -X POST http://localhost:9099/-/reload
+   * Files under ui/html are served live: edit, press F5, no rebuild needed.
+
+
+----------------------------------------------------------------------------------------------
+ PART 7 - STOP, RESTART, CLEAN UP
+----------------------------------------------------------------------------------------------
+
+        docker compose stop            stop everything, keep containers and stored logs
+        docker compose start           start them again (fast)
+        docker compose down            remove containers (keeps the Elasticsearch volume)
+        docker compose down -v         remove containers AND stored logs  (fresh start)
+        docker compose down -v --rmi local     ... and the images built by this project
+
+ Free the disk space used by the Maven build cache (optional):
+        docker builder prune
+
+
+----------------------------------------------------------------------------------------------
+ PART 8 - TROUBLESHOOTING
+----------------------------------------------------------------------------------------------
+
+ "A service shows 'Exited' or the map shows a red dot"
+        You probably used a failure drill. Press "Heal" in the console, or
+        docker compose up -d
+
+ "docker compose up" says: unknown shorthand flag / 'compose' is not a docker command
+        You have the old docker-compose v1. Install Docker Desktop or the Compose v2 plugin.
+
+ "Cannot connect to the Docker daemon"
+        Docker Desktop is not running. Start it and wait until it is ready.
+
+ "Elasticsearch / Kibana keeps restarting" or everything is extremely slow
+        Not enough memory. See 1.2 and 5.1.
+        Linux only, if Elasticsearch exits with "max virtual memory areas ... too low":
+              sudo sysctl -w vm.max_map_count=262144
+
+ "The console says Eureka is not reachable / no instances"
+        Services take about 40 s to register after their container starts.
+        Check:    docker compose ps          and          docker compose logs eureka-server
+
+ "Lesson 1 / 3 says ELK / metrics is not running"
+        The optional profile is off. See 5.1, or just: docker compose --profile elk up -d
+        (Kibana needs 2-3 minutes after Elasticsearch is ready.)
+
+ "I see no logs in the log viewer"
+        Logs need 1-3 seconds to travel Logstash -> Elasticsearch. Press a button in experiment 1
+        of lesson 1 first. Check: docker compose logs logstash
+
+ "Grafana panel is empty"
+        Start traffic in lesson 3 and wait 15 seconds. Prometheus scrapes every 5 s.
+
+ "The lab was working, then I changed .env and now ports differ"
+        Run docker compose up -d once more; the console reads its port list at start-up.
+
+ Useful commands:
+        docker compose ps                        list containers and health
+        docker compose logs -f api-gateway       follow one service's log
+        docker compose logs --tail 50 eureka-server
+        docker compose restart product-service-1
+        docker stats --no-stream                 memory use per container
+
+
+----------------------------------------------------------------------------------------------
+ PART 9 - FOR THE TEACHER  (suggested order, about 4 hours)
+----------------------------------------------------------------------------------------------
+
+   Block A  observe   : lessons 1, 2, 3        ~70 min   (start with low-memory profile off)
+   Block B  discover  : lessons 4, 5, 6, 7     ~85 min
+   Block C  gateway   : lessons 8, 9, 10, 11   ~85 min
+   Block D  pattern   : lesson 12              ~20 min
+
+ Tips
+   * Before class: run  docker compose up -d  once, open the console, press "Heal".
+   * Use the dark theme + browser zoom (Ctrl +) on a projector.
+   * The "Check yourself" questions work well as cold-call questions; answers are hidden.
+   * Every drill can be undone with the "Heal" button; the lab is safe to break.
+   * To reset the Eureka lesson timers after the self-preservation drill, set
+     EUREKA_LEASE_EXPIRATION=6 again in .env and run docker compose up -d.
+
+==============================================================================================
